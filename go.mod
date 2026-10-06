@@ -103,6 +103,9 @@ replace github.com/gobwas/glob v0.2.3 => github.com/calmh/glob v0.0.0-2022061508
 // https://github.com/jackpal/gateway/pull/49
 replace github.com/jackpal/gateway v1.1.1 => github.com/marbens-arch/gateway v1.1.2-0.20260308173556-c567cc04e7d4
 
+// Use the recursive Linux watcher fix maintained in our notify fork.
+replace github.com/syncthing/notify => github.com/allenanswerzq/notify v0.0.0-20261006042850-58ed9b403e32
+
 tool (
 	github.com/calmh/xdr/cmd/genxdr
 	github.com/maxbrunsfeld/counterfeiter/v6
