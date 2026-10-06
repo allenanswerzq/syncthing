@@ -1,0 +1,140 @@
+name: Release custom Linux build
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Full Syncthing commit to build
+        required: true
+        type: string
+      version:
+        description: Version embedded in the Syncthing binary
+        required: true
+        type: string
+      tag:
+        description: New GitHub release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # The workflow lives on main but deliberately builds the exact requested
+      # revision, allowing patched commits to remain independent from upstream.
+      - name: Check out the requested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release inputs
+        env:
+          REVISION: ${{ inputs.revision }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "revision must be a full lowercase commit" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$REVISION" ]] || {
+            echo "checkout does not match requested revision" >&2
+            exit 1
+          }
+          [[ "$VERSION" == v* ]] || {
+            echo "version must start with v" >&2
+            exit 1
+          }
+          [[ "$TAG" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
+            echo "tag contains unsupported characters" >&2
+            exit 1
+          }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release already exists: $TAG" >&2
+            exit 1
+          fi
+
+      - name: Install the Go toolchain declared by Syncthing
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test filesystem watcher integration
+        run: go test ./lib/fs ./lib/model
+
+      - name: Build the pinned Linux binary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist
+          go run build.go \
+            -no-upgrade \
+            -version "$VERSION" \
+            -build-out dist/syncthing \
+            build
+          dist/syncthing --version | tee dist/version.txt
+          grep -F "$VERSION" dist/version.txt
+
+      - name: Create release metadata and checksums
+        env:
+          REVISION: ${{ inputs.revision }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          asset="syncthing-${VERSION#v}-linux-amd64"
+          mv dist/syncthing "dist/$asset"
+          chmod 0755 "dist/$asset"
+          notify_revision="$(sed -n 's|.*github.com/allenanswerzq/notify v[^-]*-\([0-9a-f]*\)$|\1|p' go.mod)"
+          python3 - "$REVISION" "$VERSION" "$notify_revision" > dist/build-info.json <<'PY'
+          import json
+          import sys
+
+          print(
+              json.dumps(
+                  {
+                      "source_revision": sys.argv[1],
+                      "version": sys.argv[2],
+                      "notify_revision": sys.argv[3],
+                      "platform": "linux-amd64",
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+          (
+            cd dist
+            sha256sum "$asset" build-info.json > SHA256SUMS
+          )
+          echo "asset=$asset" >> "$GITHUB_ENV"
+
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Custom Linux build of Syncthing."
+            echo
+            echo "- Source revision: \`$REVISION\`"
+            echo "- Binary version: \`$VERSION\`"
+            echo "- Platform: \`linux-amd64\`"
+            echo
+            echo "The workflow tested \`./lib/fs\` and \`./lib/model\` before publishing."
+          } > "$notes"
+          gh release create "$TAG" \
+            --target "$REVISION" \
+            --title "Syncthing $VERSION Linux" \
+            --notes-file "$notes" \
+            "dist/$asset" \
+            dist/build-info.json \
+            dist/SHA256SUMS
